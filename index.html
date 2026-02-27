@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sims 3 Daily Deal Tracker</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100">
+    <div id="app" class="p-8 max-w-6xl mx-auto">
+        <h1 class="text-3xl font-bold mb-6">Sims 3 Daily Deal Calculator</h1>
+        
+        <div class="mb-6">
+            <label class="block mb-2 font-semibold">Upload your CSV or Excel file:</label>
+            <input 
+                type="file" 
+                id="fileInput"
+                accept=".csv,.xlsx,.xls"
+                class="border p-2 rounded"
+            />
+        </div>
+
+        <div id="itemSelector" class="mb-6 bg-gray-50 p-4 rounded border hidden">
+            <h2 class="text-lg font-semibold mb-3">Select Items to Track (<span id="selectedCount">0</span> selected) - <span id="currentTotal" class="text-purple-600 font-bold">0 SP</span></h2>
+            
+            <div class="mb-3">
+                <label class="block mb-2 font-semibold">Search Items:</label>
+                <input 
+                    type="text" 
+                    id="searchInput" 
+                    placeholder="Type to search..."
+                    class="w-full border rounded px-3 py-2"
+                />
+            </div>
+            
+            <div class="mb-3">
+                <label class="block mb-2 font-semibold">Sort By:</label>
+                <select id="sortSelect" class="border rounded px-3 py-2">
+                    <option value="alpha-asc">Name (A-Z)</option>
+                    <option value="alpha-desc">Name (Z-A)</option>
+                    <option value="price-asc">Price (Low to High)</option>
+                    <option value="price-desc">Price (High to Low)</option>
+                </select>
+            </div>
+            
+            <div class="mb-3">
+                <label class="block mb-2 font-semibold">Filter by Price: <span id="priceValue">Show all prices</span></label>
+                <input 
+                    type="range" 
+                    id="priceSlider" 
+                    min="0" 
+                    max="5000" 
+                    value="5000" 
+                    step="50"
+                    class="w-full"
+                />
+            </div>
+            
+            <div class="flex gap-2 mb-3">
+                <button id="selectAllBtn" class="bg-gray-600 text-white px-4 py-2 rounded hover:bg-gray-700 text-sm">
+                    Select All
+                </button>
+                <button id="deselectAllBtn" class="bg-gray-600 text-white px-4 py-2 rounded hover:bg-gray-700 text-sm">
+                    Deselect All
+                </button>
+                <button id="toggleSingleBtn" class="bg-gray-300 text-gray-700 hover:bg-gray-400 px-4 py-2 rounded text-sm">
+                    Show Single Items
+                </button>
+            </div>
+            
+            <div id="itemList" class="max-h-96 overflow-y-auto border rounded bg-white p-3"></div>
+            
+            <button id="calculateBtn" class="mt-3 bg-blue-600 text-white px-6 py-2 rounded font-semibold hover:bg-blue-700">
+                Calculate Deals for Selected Items
+            </button>
+        </div>
+
+        <div id="loading" class="text-lg hidden">Loading and analyzing...</div>
+        <div id="error" class="text-red-600 bg-red-50 p-4 rounded mb-4 hidden"></div>
+
+        <div id="results" class="space-y-6 hidden"></div>
+
+        <div id="debugInfo" class="bg-gray-100 p-4 rounded mt-6 text-xs overflow-x-auto hidden">
+            <h3 class="font-bold mb-2">Debug Info:</h3>
+            <pre id="debugText" class="whitespace-pre-wrap"></pre>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let globalData = [];
+        let availableItems = { all: [], nonSingle: [] };
+        let selectedItems = [];
+        let showSingleItems = false;
+        let selectedMonth = 'all';
+        let calculations = null;
+        let updatedCsvData = null;
+        let maxPriceFilter = 99999;
+        let sortBy = 'alpha-asc';
+        let searchQuery = '';
+
+        const defaultItems = [
+            'Al Fresco Street Market',
+            'Haute Hacienda Dining Room- Desert Cactus Sculpture',
+            'Sunlit Tides',
+            "Country Livin'",
+            'Aromatic Stove',
+            'Farm Fresh Folk Set',
+            'Hanging Kimono Wall Art',
+            'Serenity Retreat'
+        ];
+
+        // DOM Elements
+        const fileInput = document.getElementById('fileInput');
+        const itemSelector = document.getElementById('itemSelector');
+        const itemList = document.getElementById('itemList');
+        const selectedCount = document.getElementById('selectedCount');
+        const currentTotal = document.getElementById('currentTotal');
+        const searchInput = document.getElementById('searchInput');
+        const sortSelect = document.getElementById('sortSelect');
+        const priceSlider = document.getElementById('priceSlider');
+        const priceValue = document.getElementById('priceValue');
+        const selectAllBtn = document.getElementById('selectAllBtn');
+        const deselectAllBtn = document.getElementById('deselectAllBtn');
+        const toggleSingleBtn = document.getElementById('toggleSingleBtn');
+        const calculateBtn = document.getElementById('calculateBtn');
+        const loading = document.getElementById('loading');
+        const errorDiv = document.getElementById('error');
+        const results = document.getElementById('results');
+        const debugInfo = document.getElementById('debugInfo');
+        const debugText = document.getElementById('debugText');
+
+        // Event Listeners
+        fileInput.addEventListener('change', handleFileUpload);
+        searchInput.addEventListener('input', (e) => {
+            searchQuery = e.target.value.toLowerCase();
+            renderItemList();
+        });
+        sortSelect.addEventListener('change', (e) => {
+            sortBy = e.target.value;
+            renderItemList();
+        });
+        priceSlider.addEventListener('input', (e) => {
+            maxPriceFilter = parseInt(e.target.value);
+            priceValue.textContent = maxPriceFilter >= 5000 ? 'Show all prices' : 'Under ' + maxPriceFilter + ' SimPoints';
+            renderItemList();
+        });
+        selectAllBtn.addEventListener('click', handleSelectAll);
+        deselectAllBtn.addEventListener('click', handleDeselectAll);
+        toggleSingleBtn.addEventListener('click', () => {
+            showSingleItems = !showSingleItems;
+            toggleSingleBtn.textContent = showSingleItems ? 'Hide Single Items' : 'Show Single Items';
+            toggleSingleBtn.className = showSingleItems 
+                ? 'bg-yellow-500 text-white hover:bg-yellow-600 px-4 py-2 rounded text-sm'
+                : 'bg-gray-300 text-gray-700 hover:bg-gray-400 px-4 py-2 rounded text-sm';
+            renderItemList();
+        });
+        calculateBtn.addEventListener('click', () => calculateDealTimes(globalData));
+
+        function handleFileUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            loading.classList.remove('hidden');
+            errorDiv.classList.add('hidden');
+            debugText.textContent = 'Parsing file...';
+            debugInfo.classList.remove('hidden');
+
+            const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+            
+            if (isExcel) {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    try {
+                        const data = new Uint8Array(event.target.result);
+                        const workbook = XLSX.read(data, { type: 'array' });
+                        
+                        let mainSheet = null;
+                        let maxRows = 0;
+                        
+                        workbook.SheetNames.forEach(sheetName => {
+                            const sheet = workbook.Sheets[sheetName];
+                            const range = XLSX.utils.decode_range(sheet['!ref']);
+                            const rowCount = range.e.r - range.s.r;
+                            if (rowCount > maxRows) {
+                                maxRows = rowCount;
+                                mainSheet = sheet;
+                            }
+                        });
+                        
+                        if (!mainSheet) {
+                            throw new Error('No valid sheet found');
+                        }
+                        
+                        const jsonData = XLSX.utils.sheet_to_json(mainSheet, { 
+                            defval: '',
+                            blankrows: false
+                        });
+                        
+                        debugText.textContent += '\nFound sheet with ' + jsonData.length + ' rows.';
+                        
+                        const range = XLSX.utils.decode_range(mainSheet['!ref']);
+                        const hyperlinks = {};
+                        
+                        for (let R = range.s.r; R <= range.e.r; R++) {
+                            for (let C = range.s.c; C <= range.e.c; C++) {
+                                const cellAddress = XLSX.utils.encode_cell({ r: R, c: C });
+                                const cell = mainSheet[cellAddress];
+                                
+                                if (cell && cell.l && cell.l.Target) {
+                                    const rowIndex = R - 1;
+                                    if (!hyperlinks[rowIndex]) {
+                                        hyperlinks[rowIndex] = {};
+                                    }
+                                    hyperlinks[rowIndex][C] = cell.l.Target;
+                                }
+                            }
+                        }
+                        
+                        const itemKey = Object.keys(jsonData[0] || {}).find(k => k.includes('Item'));
+                        
+                        if (itemKey) {
+                            const itemColumnIndex = Object.keys(jsonData[0]).indexOf(itemKey);
+                            
+                            jsonData.forEach((row, idx) => {
+                                if (hyperlinks[idx] && hyperlinks[idx][itemColumnIndex]) {
+                                    let url = hyperlinks[idx][itemColumnIndex];
+                                    url = url.replace(/&amp;/g, '&');
+                                    row._itemLink = url;
+                                }
+                            });
+                        }
+                        
+                        processData(jsonData);
+                        
+                    } catch (err) {
+                        showError('Failed to parse Excel file: ' + err.message);
+                        loading.classList.add('hidden');
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+                
+            } else {
+                Papa.parse(file, {
+                    header: true,
+                    dynamicTyping: true,
+                    skipEmptyLines: true,
+                    complete: (result) => {
+                        debugText.textContent += '\nParsed ' + result.data.length + ' rows from CSV file.';
+                        processData(result.data);
+                    },
+                    error: (err) => {
+                        showError('Parse error: ' + err.message);
+                        loading.classList.add('hidden');
+                    }
+                });
+            }
+        }
+
+        function processData(data) {
+            globalData = data;
+            
+            const sampleKeys = Object.keys(data[0] || {});
+            const itemKey = sampleKeys.find(k => k.includes('Item'));
+            const categoryKey = sampleKeys.find(k => k.includes('Category'));
+            
+            // Build a map of item names to their cheapest prices
+            const itemPrices = {};
+            data.forEach(d => {
+                const itemName = d[itemKey];
+                const price = d['Daily Deal Price'];
+                if (itemName && price != null) {
+                    if (!itemPrices[itemName] || price < itemPrices[itemName]) {
+                        itemPrices[itemName] = price;
+                    }
+                }
+            });
+            
+            // Store item prices for filtering
+            window.itemPrices = itemPrices;
+            
+            const allItems = data
+                .map(d => d[itemKey])
+                .filter((item, idx, arr) => item && arr.indexOf(item) === idx)
+                .sort();
+            
+            const itemsWithoutSingle = data
+                .filter(d => {
+                    const cat = d[categoryKey];
+                    return !cat || !cat.toLowerCase().includes('single');
+                })
+                .map(d => d[itemKey])
+                .filter((item, idx, arr) => item && arr.indexOf(item) === idx)
+                .sort();
+            
+            availableItems = { all: allItems, nonSingle: itemsWithoutSingle };
+            
+            // Select default items (from both single and non-single lists)
+            const itemsToSelect = defaultItems.filter(item => allItems.includes(item));
+            selectedItems = itemsToSelect;
+            
+            itemSelector.classList.remove('hidden');
+            renderItemList();
+            updateSelectedCount();
+            
+            calculateDealTimes(data);
+            loading.classList.add('hidden');
+        }
+
+        function renderItemList() {
+            const items = showSingleItems ? availableItems.all : availableItems.nonSingle;
+            
+            // Filter by price and search
+            let filteredItems = items.filter(item => {
+                const price = window.itemPrices[item];
+                const matchesPrice = price != null && price <= maxPriceFilter;
+                const matchesSearch = searchQuery === '' || item.toLowerCase().includes(searchQuery);
+                return matchesPrice && matchesSearch;
+            });
+            
+            // Sort items
+            filteredItems.sort((a, b) => {
+                if (sortBy === 'alpha-asc') {
+                    return a.localeCompare(b);
+                } else if (sortBy === 'alpha-desc') {
+                    return b.localeCompare(a);
+                } else if (sortBy === 'price-asc') {
+                    return (window.itemPrices[a] || 0) - (window.itemPrices[b] || 0);
+                } else if (sortBy === 'price-desc') {
+                    return (window.itemPrices[b] || 0) - (window.itemPrices[a] || 0);
+                }
+                return 0;
+            });
+            
+            itemList.innerHTML = filteredItems.map((item, idx) => {
+                const price = window.itemPrices[item];
+                return `
+                    <label class="flex items-center p-2 hover:bg-gray-50 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            value="${item}"
+                            ${selectedItems.includes(item) ? 'checked' : ''}
+                            onchange="handleItemToggle('${item.replace(/'/g, "\\'")}')"
+                            class="mr-3 w-4 h-4"
+                        />
+                        <span class="text-sm flex-grow">${item}</span>
+                        <span class="text-xs text-gray-500 ml-2">${price} SP</span>
+                    </label>
+                `;
+            }).join('');
+        }
+
+        function handleItemToggle(itemName, index, event) {
+            if (selectedItems.includes(itemName)) {
+                selectedItems = selectedItems.filter(i => i !== itemName);
+            } else {
+                selectedItems.push(itemName);
+            }
+            updateSelectedCount();
+        }
+
+        function handleSelectAll() {
+            const items = showSingleItems ? availableItems.all : availableItems.nonSingle;
+            
+            // Filter by price and search (same as renderItemList)
+            const filteredItems = items.filter(item => {
+                const price = window.itemPrices[item];
+                const matchesPrice = price != null && price <= maxPriceFilter;
+                const matchesSearch = searchQuery === '' || item.toLowerCase().includes(searchQuery);
+                return matchesPrice && matchesSearch;
+            });
+            
+            selectedItems = [...filteredItems];
+            renderItemList();
+            updateSelectedCount();
+        }
+
+        function handleDeselectAll() {
+            selectedItems = [];
+            renderItemList();
+            updateSelectedCount();
+        }
+
+        function updateSelectedCount() {
+            selectedCount.textContent = selectedItems.length;
+            
+            // Calculate current total
+            let total = 0;
+            selectedItems.forEach(item => {
+                total += window.itemPrices[item] || 0;
+            });
+            currentTotal.textContent = total + ' SP';
+        }
+
+        function showError(message) {
+            errorDiv.textContent = message;
+            errorDiv.classList.remove('hidden');
+        }
+
+        function calculateDealTimes(deals) {
+            const itemKey = Object.keys(deals[0] || {}).find(k => k.includes('Item'));
+            
+            if (!itemKey) {
+                showError('Could not find Item column');
+                return;
+            }
+            
+            const allRoutineMachines = deals
+                .map((d, idx) => ({ deal: d, index: idx }))
+                .filter(item => {
+                    const itemName = item.deal[itemKey];
+                    return itemName && itemName.includes('Not So Routine Machine');
+                });
+            
+            let currentDealIndex = -1;
+            
+            for (const machine of allRoutineMachines) {
+                const i = machine.index;
+                if (i < 2 || i >= deals.length - 1) continue;
+                
+                const current = deals[i];
+                const next = deals[i + 1];
+                const prev1 = deals[i - 1];
+                const prev2 = deals[i - 2];
+                
+                const nextItem = next[itemKey];
+                const prev1Item = prev1[itemKey];
+                const prev2Item = prev2[itemKey];
+                
+                if (nextItem && nextItem.includes("It's Game Time")) {
+                    const hasRelaxedSweater = (prev1Item && prev1Item.includes('Relaxed Sweater')) || (prev2Item && prev2Item.includes('Relaxed Sweater'));
+                    const hasIslandVilla = (prev1Item && prev1Item.includes('Island Villa')) || (prev2Item && prev2Item.includes('Island Villa'));
+                    
+                    if (hasRelaxedSweater && hasIslandVilla) {
+                        currentDealIndex = i;
+                        break;
+                    }
+                }
+            }
+            
+            if (currentDealIndex === -1) {
+                showError('Could not find the correct deal sequence.');
+                return;
+            }
+            
+            const now = new Date();
+            const referenceStart = new Date('2026-01-22T18:56:00');
+            const hoursSinceReference = (now - referenceStart) / (1000 * 60 * 60);
+            
+            let currentActiveDealIndex = currentDealIndex;
+            let hoursAccumulated = 0;
+            let dealsChecked = 0;
+            
+            while (hoursAccumulated < hoursSinceReference && dealsChecked < deals.length * 2) {
+                const durationCol = Object.keys(deals[currentActiveDealIndex]).find(k => k.includes('Duration'));
+                const dealDuration = deals[currentActiveDealIndex][durationCol] || 2;
+                
+                if (hoursAccumulated + dealDuration > hoursSinceReference) {
+                    break;
+                }
+                
+                hoursAccumulated += dealDuration;
+                currentActiveDealIndex = (currentActiveDealIndex + 1) % deals.length;
+                dealsChecked++;
+            }
+            
+            const currentActiveDeal = deals[currentActiveDealIndex];
+            const durationCol = Object.keys(currentActiveDeal).find(k => k.includes('Duration'));
+            const currentActiveDuration = currentActiveDeal[durationCol] || 2;
+            const currentActiveStart = new Date(referenceStart.getTime() + hoursAccumulated * 60 * 60 * 1000);
+            const currentActiveEnd = new Date(currentActiveStart.getTime() + currentActiveDuration * 60 * 60 * 1000);
+            const timeRemainingMs = currentActiveEnd - now;
+            const hoursRemaining = Math.floor(timeRemainingMs / (1000 * 60 * 60));
+            const minutesRemaining = Math.floor((timeRemainingMs % (1000 * 60 * 60)) / (1000 * 60));
+            
+            // Generate CSV data
+            const updatedDeals = deals.map((deal, idx) => {
+                let totalHours = 0;
+                
+                if (idx > currentDealIndex) {
+                    for (let i = currentDealIndex; i < idx; i++) {
+                        const durCol = Object.keys(deals[i]).find(k => k.includes('Duration'));
+                        totalHours += deals[i][durCol] || 2;
+                    }
+                } else if (idx < currentDealIndex) {
+                    for (let i = currentDealIndex; i < deals.length; i++) {
+                        const durCol = Object.keys(deals[i]).find(k => k.includes('Duration'));
+                        totalHours += deals[i][durCol] || 2;
+                    }
+                    for (let i = 0; i < idx; i++) {
+                        const durCol = Object.keys(deals[i]).find(k => k.includes('Duration'));
+                        totalHours += deals[i][durCol] || 2;
+                    }
+                }
+                
+                const dealStartTime = new Date(referenceStart.getTime() + totalHours * 60 * 60 * 1000);
+                const formattedStartTime = dealStartTime.toLocaleString('en-US', {
+                    month: 'short',
+                    day: 'numeric',
+                    year: '2-digit',
+                    hour: 'numeric',
+                    minute: '2-digit',
+                    hour12: true
+                });
+                
+                const percentOffCol = Object.keys(deal).find(k => k.includes('Percent off'));
+                const durCol = Object.keys(deal).find(k => k.includes('Duration'));
+                const setsCol = Object.keys(deal).find(k => k.includes('Sets or Compilations'));
+                const commentsCol = Object.keys(deal).find(k => k.includes('Comments'));
+                const categoryCol = Object.keys(deal).find(k => k.includes('Category'));
+                
+                return {
+                    'Deal Number': deal['Deal Number'],
+                    'Item': deal[itemKey],
+                    'Daily Deal Price': deal['Daily Deal Price'],
+                    'Regular Price': deal['Regular Price'],
+                    'Percent off': deal[percentOffCol],
+                    'Scheduled Duration in Hours': deal[durCol],
+                    'Start Time': formattedStartTime,
+                    'Link': deal._itemLink || '',
+                    'Sets or Compilations the deal is included in': deal[setsCol],
+                    'Comments': deal[commentsCol],
+                    'Category': deal[categoryCol]
+                };
+            });
+            
+            updatedCsvData = updatedDeals;
+            
+            // Calculate predictions
+            const itemPredictions = {};
+            
+            selectedItems.forEach(itemName => {
+                const allDealsForItem = deals
+                    .map((deal, idx) => ({ ...deal, originalIndex: idx }))
+                    .filter(d => {
+                        const name = d[itemKey];
+                        return name && name.includes(itemName);
+                    });
+                
+                if (allDealsForItem.length === 0) {
+                    itemPredictions[itemName] = { found: false, link: null };
+                    return;
+                }
+                
+                const prices = allDealsForItem.map(d => d['Daily Deal Price']).filter(p => p != null);
+                const cheapestPrice = Math.min(...prices);
+                const cheapestDeals = allDealsForItem.filter(d => d['Daily Deal Price'] === cheapestPrice);
+                
+                const predictions = cheapestDeals.map(item => {
+                    let totalHours = 0;
+                    const itemIndex = item.originalIndex;
+                    
+                    if (itemIndex > currentActiveDealIndex) {
+                        for (let i = currentActiveDealIndex; i < itemIndex; i++) {
+                            const durCol = Object.keys(deals[i]).find(k => k.includes('Duration'));
+                            totalHours += deals[i][durCol] || 2;
+                        }
+                    } else {
+                        for (let i = currentActiveDealIndex; i < deals.length; i++) {
+                            const durCol = Object.keys(deals[i]).find(k => k.includes('Duration'));
+                            totalHours += deals[i][durCol] || 2;
+                        }
+                        for (let i = 0; i < itemIndex; i++) {
+                            const durCol = Object.keys(deals[i]).find(k => k.includes('Duration'));
+                            totalHours += deals[i][durCol] || 2;
+                        }
+                    }
+                    
+                    const itemStartTime = new Date(currentActiveStart.getTime() + totalHours * 60 * 60 * 1000);
+                    const durCol = Object.keys(item).find(k => k.includes('Duration'));
+                    const itemDuration = item[durCol] || 2;
+                    const itemEndTime = new Date(itemStartTime.getTime() + itemDuration * 60 * 60 * 1000);
+                    
+                    let cycleDuration = 0;
+                    for (let i = 0; i < deals.length; i++) {
+                        const durCol = Object.keys(deals[i]).find(k => k.includes('Duration'));
+                        cycleDuration += deals[i][durCol] || 2;
+                    }
+                    
+                    const secondOccurrenceStart = new Date(itemStartTime.getTime() + cycleDuration * 60 * 60 * 1000);
+                    const secondOccurrenceEnd = new Date(secondOccurrenceStart.getTime() + itemDuration * 60 * 60 * 1000);
+                    
+                    return {
+                        dealNumber: item['Deal Number'],
+                        item: item[itemKey],
+                        price: item['Daily Deal Price'],
+                        regularPrice: item['Regular Price'],
+                        duration: itemDuration,
+                        startTime: itemStartTime,
+                        endTime: itemEndTime,
+                        secondStartTime: secondOccurrenceStart,
+                        secondEndTime: secondOccurrenceEnd,
+                        hoursFromNow: totalHours,
+                        link: item._itemLink || null
+                    };
+                });
+                
+                // Sort predictions by start time
+                predictions.sort((a, b) => a.startTime - b.startTime);
+                
+                itemPredictions[itemName] = {
+                    found: true,
+                    cheapestPrice,
+                    totalOccurrences: allDealsForItem.length,
+                    cheapestOccurrences: cheapestDeals.length,
+                    predictions,
+                    link: null,
+                    nextOccurrence: predictions[0] ? predictions[0].startTime : null
+                };
+            });
+            
+            calculations = {
+                currentDeal: currentActiveDeal,
+                currentDuration: currentActiveDuration,
+                dealStart: currentActiveStart,
+                dealEnds: currentActiveEnd,
+                hoursRemaining,
+                minutesRemaining,
+                itemPredictions,
+                itemKey
+            };
+            
+            renderResults();
+        }
+
+        function renderResults() {
+            if (!calculations) return;
+            
+            const colors = ['green', 'purple', 'orange', 'pink', 'yellow', 'teal', 'red', 'indigo', 'cyan', 'lime', 'fuchsia', 'amber'];
+            
+            // Sort items
+            const sortedItemNames = selectedItems.sort((a, b) => {
+                const dataA = calculations.itemPredictions[a];
+                const dataB = calculations.itemPredictions[b];
+                
+                if (!dataA && !dataB) return 0;
+                if (!dataA) return -1;
+                if (!dataB) return 1;
+                if (!dataA.found && !dataB.found) return 0;
+                if (!dataA.found) return -1;
+                if (!dataB.found) return 1;
+                
+                const timeA = dataA.nextOccurrence || 0;
+                const timeB = dataB.nextOccurrence || 0;
+                return timeA - timeB;
+            });
+            
+            let html = `
+                <div class="bg-blue-50 p-4 rounded">
+                    <h2 class="text-xl font-semibold mb-2">Current Deal (Right Now)</h2>
+                    <p><strong>Deal #${calculations.currentDeal['Deal Number']}:</strong> ${calculations.currentDeal[calculations.itemKey]}</p>
+                    <p><strong>Duration:</strong> ${calculations.currentDuration} hours</p>
+                    <p><strong>Started:</strong> ${calculations.dealStart.toLocaleString()}</p>
+                    <p><strong>Ends:</strong> ${calculations.dealEnds.toLocaleString()}</p>
+                    <p class="text-lg font-bold text-green-600 mt-2">
+                        <strong>Time Remaining:</strong> ${calculations.hoursRemaining}h ${calculations.minutesRemaining}m
+                    </p>
+                </div>
+            `;
+            
+            // Calculate total cost
+            let totalCheapestPrice = 0;
+            let totalRegularPrice = 0;
+            let itemsFound = 0;
+            
+            sortedItemNames.forEach(itemName => {
+                const itemData = calculations.itemPredictions[itemName];
+                if (itemData && itemData.found) {
+                    totalCheapestPrice += itemData.cheapestPrice;
+                    if (itemData.predictions[0] && itemData.predictions[0].regularPrice) {
+                        totalRegularPrice += itemData.predictions[0].regularPrice;
+                    }
+                    itemsFound++;
+                }
+            });
+            
+            if (itemsFound > 0) {
+                const savings = totalRegularPrice - totalCheapestPrice;
+                const savingsPercent = totalRegularPrice > 0 ? Math.round((savings / totalRegularPrice) * 100) : 0;
+                
+                html += `
+                    <div class="bg-purple-50 p-4 rounded border-2 border-purple-500">
+                        <h2 class="text-xl font-semibold mb-2">Total Cost Summary</h2>
+                        <p class="text-sm text-gray-600 mb-2">If you buy all ${itemsFound} selected items at their cheapest prices:</p>
+                        <p class="text-2xl font-bold text-purple-700"><strong>Total Deal Price:</strong> ${totalCheapestPrice} SimPoints</p>
+                        ${totalRegularPrice > 0 ? `
+                            <p class="text-lg text-gray-700"><strong>Regular Price:</strong> ${totalRegularPrice} SimPoints</p>
+                            <p class="text-lg font-bold text-green-600"><strong>You Save:</strong> ${savings} SimPoints (${savingsPercent}% off)</p>
+                        ` : ''}
+                    </div>
+                `;
+            }
+            
+            html += `
+                ${updatedCsvData ? `
+                    <div class="bg-green-100 p-4 rounded border-2 border-green-600">
+                        <h2 class="text-xl font-semibold mb-2">Download Updated CSV</h2>
+                        <p class="mb-3">All start times have been recalculated based on the current deal cycle.</p>
+                        <button onclick="downloadCsv()" class="bg-green-600 text-white px-6 py-2 rounded font-semibold hover:bg-green-700">
+                            Download CSV with Corrected Start Times
+                        </button>
+                    </div>
+                ` : ''}
+            `;
+            
+            sortedItemNames.forEach((itemName, idx) => {
+                const itemData = calculations.itemPredictions[itemName];
+                if (!itemData) return;
+                
+                const color = colors[idx % colors.length];
+                
+                if (!itemData.found) {
+                    html += `
+                        <div class="bg-${color}-50 p-4 rounded mb-4">
+                            <h2 class="text-xl font-semibold mb-2">${itemName}</h2>
+                            <p class="text-red-600">No ${itemName} deals found</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                const hasLink = itemData.predictions[0] && itemData.predictions[0].link;
+                const titleHtml = hasLink 
+                    ? `<a href="${itemData.predictions[0].link}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">${itemName} (Cheapest Price: ${itemData.cheapestPrice}) ↗</a>`
+                    : `${itemName} (Cheapest Price: ${itemData.cheapestPrice})`;
+                
+                html += `
+                    <div class="bg-${color}-50 p-4 rounded mb-4">
+                        <h2 class="text-xl font-semibold mb-2">${titleHtml}</h2>
+                        <p class="text-sm text-gray-600 mb-3">
+                            Found ${itemData.totalOccurrences} total occurrences, showing ${itemData.cheapestOccurrences} at cheapest price
+                        </p>
+                        <div class="space-y-4">
+                `;
+                
+                itemData.predictions.forEach((pred, predIdx) => {
+                    const startHour = pred.startTime.getHours();
+                    const startMinute = pred.startTime.getMinutes();
+                    const endHour = pred.endTime.getHours();
+                    const endMinute = pred.endTime.getMinutes();
+                    
+                    const startTotalMinutes = startHour * 60 + startMinute;
+                    const endTotalMinutes = endHour * 60 + endMinute;
+                    const nightStart = 1 * 60 + 30;
+                    const nightEnd = 5 * 60;
+                    
+                    const isDuringNight = startTotalMinutes >= nightStart && 
+                                          endTotalMinutes <= nightEnd && 
+                                          endTotalMinutes > startTotalMinutes;
+                    
+                    const formatDate = (date) => date.toLocaleString('en-US', { 
+                        weekday: 'short', 
+                        year: 'numeric', 
+                        month: 'short', 
+                        day: 'numeric', 
+                        hour: 'numeric', 
+                        minute: '2-digit',
+                        hour12: true 
+                    });
+                    
+                    html += `
+                        <div class="bg-white p-4 rounded border-2 border-${color}-500">
+                            <p class="text-lg font-bold mb-2">Occurrence #${predIdx + 1}</p>
+                            <p><strong>Deal Number:</strong> ${pred.dealNumber}</p>
+                            <p><strong>Price:</strong> ${pred.price}</p>
+                            <p><strong>Regular Price:</strong> ${pred.regularPrice}</p>
+                    `;
+                    
+                    if (isDuringNight) {
+                        html += `
+                            <div class="mt-3 p-3 bg-red-50 rounded">
+                                <p class="font-semibold mb-1 text-red-700">Next Occurrence (During Night 1:30-5:00 AM):</p>
+                                <p class="text-red-600 font-bold">
+                                    <strong>Starts:</strong> ${formatDate(pred.startTime)}
+                                </p>
+                                <p class="text-red-600 font-bold">
+                                    <strong>Ends:</strong> ${formatDate(pred.endTime)}
+                                </p>
+                            </div>
+                            
+                            <div class="mt-3 p-3 bg-blue-50 rounded">
+                                <p class="font-semibold mb-1">Following Occurrence:</p>
+                                <p class="text-blue-600 font-bold">
+                                    <strong>Starts:</strong> ${formatDate(pred.secondStartTime)}
+                                </p>
+                                <p class="text-blue-600 font-bold">
+                                    <strong>Ends:</strong> ${formatDate(pred.secondEndTime)}
+                                </p>
+                            </div>
+                        `;
+                    } else {
+                        html += `
+                            <div class="mt-3 p-3 bg-blue-50 rounded">
+                                <p class="font-semibold mb-1">Next Occurrence:</p>
+                                <p class="text-blue-600 font-bold">
+                                    <strong>Starts:</strong> ${formatDate(pred.startTime)}
+                                </p>
+                                <p class="text-blue-600 font-bold">
+                                    <strong>Ends:</strong> ${formatDate(pred.endTime)}
+                                </p>
+                            </div>
+                            
+                            <div class="mt-3 p-3 bg-gray-50 rounded">
+                                <p class="font-semibold mb-1">Following Occurrence (after full cycle):</p>
+                                <p class="text-gray-700">
+                                    <strong>Starts:</strong> ${formatDate(pred.secondStartTime)}
+                                </p>
+                                <p class="text-gray-700">
+                                    <strong>Ends:</strong> ${formatDate(pred.secondEndTime)}
+                                </p>
+                            </div>
+                        `;
+                    }
+                    
+                    html += `</div>`;
+                });
+                
+                html += `</div></div>`;
+            });
+            
+            results.innerHTML = html;
+            results.classList.remove('hidden');
+        }
+
+        function downloadCsv() {
+            if (!updatedCsvData) return;
+            
+            const csv = Papa.unparse(updatedCsvData);
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'Daily_Deal_Tracker_Updated.csv');
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+    </script>
+</body>
+</html>
